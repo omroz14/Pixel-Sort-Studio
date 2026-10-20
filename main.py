@@ -1,4 +1,13 @@
-"""Start aplikacji Pixel Sort Studio."""
+"""Pixel Sort Studio entry point."""
+import sys
+
+try:
+    import tkinter  # noqa: F401
+except ImportError:
+    sys.exit("Tkinter is not installed.\n"
+             "  Debian / Ubuntu / Linux Mint:  sudo apt install python3-tk\n"
+             "  Windows / macOS: reinstall Python from python.org with the 'tcl/tk' option enabled.")
+
 from ui import App
 
 if __name__ == "__main__":

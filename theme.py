@@ -1,4 +1,4 @@
-"""Paleta kolorów, czcionki i wspólne widgety w ciemnym stylu."""
+"""Color palette, fonts and shared widgets in a dark style."""
 import tkinter as tk
 
 BG = "#0d0f14"
@@ -25,7 +25,7 @@ def hex_to_rgb(h):
 
 
 class Button(tk.Label):
-    """Płaski przycisk oparty na Label. Na macOS tk.Button ignoruje kolory, dlatego ta wersja."""
+    """Flat button based on Label. On macOS tk.Button ignores colors, hence this version."""
 
     def __init__(self, master, text, command, accent=False):
         self._command = command
@@ -39,7 +39,7 @@ class Button(tk.Label):
         self.bind("<Button-1>", lambda e: self._command())
 
     def select(self, on):
-        """Podświetla przycisk jako aktywny (np. wybrany tryb widoku)."""
+        """Highlights the button as active (e.g. the selected view mode)."""
         self._base = ACCENT if on else SURFACE_2
         self.configure(bg=self._base)
 
@@ -57,5 +57,5 @@ def make_slider(master, lo, hi, value, length=250):
                  showvalue=False, length=length, bg=SURFACE, troughcolor=SURFACE_2,
                  activebackground=ACCENT, highlightthickness=0, bd=0,
                  relief="flat", sliderlength=16, width=10)
-    s.set(value)  # ustawiamy wartość przed podpięciem command
+    s.set(value)  # set the value before attaching the command
     return s

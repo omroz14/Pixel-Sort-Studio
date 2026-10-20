@@ -1,10 +1,10 @@
-"""Pędzel maski: rysowanie pociągnięć i nakładka podglądu."""
+"""Mask brush: stroke drawing and the preview overlay."""
 import numpy as np
 from PIL import Image, ImageDraw
 
 
 def stroke(mask, p0, p1, radius, value):
-    """Pociągnięcie od p0 do p1. Koła na końcach nie zostawiają dziur przy szybkim ruchu."""
+    """Stroke from p0 to p1. Circles at the ends leave no gaps during fast movement."""
     d = ImageDraw.Draw(mask)
     r = max(1, round(radius))
     a = (round(p0[0]), round(p0[1]))
@@ -16,12 +16,12 @@ def stroke(mask, p0, p1, radius, value):
 
 
 def downscale(mask, size):
-    """Zmniejsza maskę bez gubienia cienkich linii: każdy dotknięty piksel zostaje zaznaczony."""
+    """Shrinks the mask without losing thin lines: every touched pixel stays selected."""
     return mask.resize(size, Image.BOX).point(lambda v: 255 if v else 0)
 
 
 def overlay(base, inside, color, alpha=0.5):
-    """Barwi obszar maski. base: HxWx3 uint8, inside: HxW bool, color: krotka RGB."""
+    """Tints the mask area. base: HxWx3 uint8, inside: HxW bool, color: RGB tuple."""
     out = base.astype(np.float32)
     tint = np.array(color, np.float32)
     out[inside] = out[inside] * (1 - alpha) + tint * alpha

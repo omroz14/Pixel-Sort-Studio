@@ -1,39 +1,42 @@
-"""Sortowanie pikseli wzdłuż wektora kierunku. Obraz nigdy nie jest obracany.
+"""Pixel sorting along a direction vector. The image is never rotated.
 
-Piksele grupujemy w linie równoległe do kierunku i każdą linię sortujemy wzdłuż niej.
-Kluczem jest wybrana cecha (jasność, odcień, nasycenie, wartość), opcjonalnie
-skwantowana. Każdy piksel dostaje unikalny klucz (najpierw cecha, potem numer piksela),
-więc animacja i szybki wynik zawsze dają identyczny porządek.
+Pixels are grouped into lines parallel to the direction and each line is sorted along itself.
+The sort key is a chosen property (brightness, hue, saturation, value), optionally quantized.
+Every pixel gets a unique key (property first, then pixel index), so the animation and the
+fast result always produce the identical order.
+
+Threshold: only pixels whose property lies in [lo, hi] (0..1) are sorted. The others stay in
+place and break the line into separate segments, so sorting happens in independent runs.
 """
 import math
 
 import numpy as np
 
-PROPERTIES = (("luma", "Jasność"), ("hue", "Odcień"), ("sat", "Nasycenie"), ("val", "Wartość"))
-ALGORITHMS = (("odd_even", "Odd-even"), ("bitonic", "Bitoniczny"), ("bubble", "Bąbelkowy"))
+PROPERTIES = (("luma", "Brightness"), ("hue", "Hue"), ("sat", "Saturation"), ("val", "Value"))
+ALGORITHMS = (("odd_even", "Odd-even"), ("bitonic", "Bitonic"), ("bubble", "Bubble"))
 QUIET_LIMIT = {"odd_even": 2, "bubble": 1, "bitonic": None}
 LUM = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
 def direction(angle):
-    """Kąt w stopniach -> wektor (dx, dy). 0° = w prawo, 90° = w górę, 45° = w prawy górny róg."""
+    """Angle in degrees -> vector (dx, dy). 0° = right, 90° = up, 45° = upper right."""
     rad = math.radians(angle)
-    dx, dy = math.cos(rad), -math.sin(rad)   # oś y obrazu rośnie w dół
+    dx, dy = math.cos(rad), -math.sin(rad)   # the image y axis grows downwards
     m = max(abs(dx), abs(dy))
     return dx / m, dy / m
 
 
 def build_segments(shape, angle, region=None):
-    """Odcinki (tablice indeksów pikseli), każdy ciągły i uporządkowany wzdłuż kierunku.
+    """Segments (arrays of pixel indices), each contiguous and ordered along the direction.
 
-    region: bool (H, W), True = wolno sortować; None = cały obraz.
+    region: bool (H, W), True = may be sorted; None = the whole image.
     """
     H, W = shape
     dx, dy = direction(angle)
     xs = np.tile(np.arange(W, dtype=np.float32), H)
     ys = np.repeat(np.arange(H, dtype=np.float32), W)
-    line = np.round(-xs * dy + ys * dx).astype(np.int32)   # numer linii równoległej do kierunku
-    pos = xs * dx + ys * dy                                  # położenie wzdłuż kierunku
+    line = np.round(-xs * dy + ys * dx).astype(np.int32)   # index of the line parallel to the direction
+    pos = xs * dx + ys * dy                                  # position along the direction
     order = np.lexsort((pos, line))
     inside = np.ones(H * W, bool) if region is None else region.ravel()
     segments = []
@@ -48,7 +51,7 @@ def build_segments(shape, angle, region=None):
 
 
 def _unit(flat, prop):
-    """Cecha każdego piksela, znormalizowana do przedziału [0, 1]."""
+    """Property of every pixel, normalized to [0, 1]."""
     f = flat.astype(np.float32) * np.float32(1.0 / 255.0)
     if prop == "luma":
         return f @ LUM
@@ -66,7 +69,14 @@ def _unit(flat, prop):
 
 
 def sort_keys(flat, prop, levels, reverse):
-    """Unikalny klucz każdego piksela: cecha (opcjonalnie skwantowana), potem numer piksela."""
+    """Unique key per pixel: the property (optionally quantized), then the pixel index.
+
+    Quantization: with `levels` buckets, the property u in [0, 1] becomes
+    floor(u * levels), clipped to levels - 1. Pixels in the same bucket tie on the property,
+    so the pixel index decides and they keep their original relative order. Fewer levels give
+    a coarser sort that preserves more of the original structure. Without quantization 65535
+    buckets are used, which is practically exact.
+    """
     u = np.clip(_unit(flat, prop), 0.0, 1.0)
     if levels:
         bucket = np.minimum(np.floor(u * levels), levels - 1)
@@ -79,17 +89,36 @@ def sort_keys(flat, prop, levels, reverse):
     return bucket * n + np.arange(n, dtype=np.float64)
 
 
+def effective_region(rgb, region, prop, lo=0.0, hi=1.0):
+    """Area where sorting is allowed: the user mask intersected with the property threshold.
+
+    A pixel passes the threshold when its property (0..1) lies in [lo, hi]. The threshold is
+    evaluated on the current image, because after every pass the colors sit elsewhere. Sorting
+    only permutes pixels inside segments, and the segments consist of in-range pixels, so the
+    area does not change after a pass with the same property.
+
+    region: bool (H, W) or None. Returns bool (H, W) or None (= the whole image).
+    """
+    if lo <= 0.0 and hi >= 1.0:
+        return region
+    H, W = rgb.shape[:2]
+    u = np.clip(_unit(rgb.reshape(-1, 3), prop), 0.0, 1.0).reshape(H, W)
+    inside = (u >= lo) & (u <= hi)
+    return inside if region is None else region & inside
+
+
 def sort_fast(flat, segments, ck):
-    """Sortuje każdy odcinek naraz, bez animacji."""
+    """Sorts every segment at once, without animation."""
     out = flat.copy()
     for seg in segments:
         out[seg] = flat[seg[np.argsort(ck[seg])]]
     return out
 
 
-def run_fast(rgb, angle, prop, levels, reverse, region=None):
-    """Pełny przebieg bez animacji. Służy do wyniku w pełnej rozdzielczości."""
+def run_fast(rgb, angle, prop, levels, reverse, region=None, lo=0.0, hi=1.0):
+    """Full pass without animation. Used for the full-resolution result."""
     flat = rgb.reshape(-1, 3)
+    region = effective_region(rgb, region, prop, lo, hi)
     segs = build_segments(rgb.shape[:2], angle, region)
     out = sort_fast(flat, segs, sort_keys(flat, prop, levels, reverse))
     return out.reshape(rgb.shape)
@@ -111,7 +140,12 @@ def _total(algo, P):
 
 
 def _steps(algo, P):
-    """Generator kroków. Każdy krok to lista operacji porównaj-zamień (a, b, kierunek)."""
+    """Generator of steps. Each step is a list of compare-exchange operations (a, b, ascending).
+
+    Every comparator is ascending: the smaller key always goes to the lower index. The Animator
+    relies on this, because the padding (+inf) at the end of a short segment then never moves,
+    so every intermediate state can be rendered.
+    """
     if algo == "odd_even":
         for p in range(P):
             a = np.arange(p % 2, P - 1, 2)
@@ -119,22 +153,29 @@ def _steps(algo, P):
     elif algo == "bubble":
         for p in range(P - 1):
             yield [(j, j + 1, True) for j in range(P - 1 - p)]
-    else:  # bitoniczny: sieć o O(log² n) etapach
+    else:  # bitonic: a network with O(log² n) stages
+        # Variant with only ascending comparators. The first step of each merge stage compares
+        # every element with its mirror image inside the block of size k (index ^ (k - 1));
+        # the following steps are the usual half-cleaners (index ^ j). The classic version
+        # alternates the direction per block, which would pull the padding into visible slots.
         idx = np.arange(P)
+
+        def step(partner):
+            keep = partner > idx
+            return [(idx[keep], partner[keep], True)]
+
         k = 2
         while k <= P:
-            j = k // 2
+            yield step(idx ^ (k - 1))
+            j = k // 4
             while j >= 1:
-                partner = idx ^ j
-                keep = partner > idx
-                a, b = idx[keep], partner[keep]
-                yield [(a, b, (a & k) == 0)]
+                yield step(idx ^ j)
                 j //= 2
             k *= 2
 
 
 class Animator:
-    """Wykonuje wybrany algorytm krok po kroku, na wszystkich odcinkach naraz."""
+    """Runs the chosen algorithm step by step, on all segments at once."""
 
     def __init__(self, rgb, segments, ck, algo):
         self.shape = rgb.shape
@@ -149,17 +190,17 @@ class Animator:
         self.quiet_limit = QUIET_LIMIT[algo]
         self._quiet = 0
         self._gen = _steps(algo, P)
-        # slot[i, j]: który piksel fizycznie leży na pozycji j odcinka i (-1 = brak)
+        # slot[i, j]: which pixel physically sits at position j of segment i (-1 = none)
         self.slot = np.full((n, P), -1, np.int64)
         for i, seg in enumerate(segments):
             self.slot[i, :seg.size] = seg
         self.valid = self.slot >= 0
-        self.C = np.where(self.valid, self.slot, N)      # który piksel jest na pozycji (N = pusta)
-        self.ck = np.append(ck, np.inf)                  # pusta pozycja zawsze na końcu
+        self.C = np.where(self.valid, self.slot, N)      # which pixel is at the position (N = empty)
+        self.ck = np.append(ck, np.inf)                  # an empty position always sorts to the end
         self.activity = np.zeros((n, P), np.float32)
 
     def advance(self):
-        """Jeden krok. Zwraca False, gdy nie ma już nic do zrobienia."""
+        """One step. Returns False when there is nothing left to do."""
         if self.finished:
             return False
         ops = next(self._gen, None)
@@ -203,8 +244,9 @@ class Animator:
         return heat.reshape(H, W)
 
 
-def record(rgb, angle, prop, levels, reverse, algo, region=None, max_frames=120):
-    """Klatki animacji od bieżącego stanu, do zapisu GIF."""
+def record(rgb, angle, prop, levels, reverse, algo, region=None, lo=0.0, hi=1.0, max_frames=120):
+    """Animation frames from the current state, for the GIF export."""
+    region = effective_region(rgb, region, prop, lo, hi)
     segs = build_segments(rgb.shape[:2], angle, region)
     ck = sort_keys(rgb.reshape(-1, 3), prop, levels, reverse)
     anim = Animator(rgb, segs, ck, algo)
