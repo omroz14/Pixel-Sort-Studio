@@ -231,7 +231,7 @@ working copy, whether or not the Animate switch is on.
 
 ## More projects
 
-- [Pixel Merger](https://github.com/omroz14/pixel-merger): rebuild one image out of the pixels of another.
+- [Pixel Merger Studio](https://github.com/omroz14/pixel-merger-studio): rebuild one image out of the pixels of another.
 - [Vector Field Studio](https://github.com/omroz14/vector-field-studio): explore 2D vector fields.
 
 ## License
