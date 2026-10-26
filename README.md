@@ -40,6 +40,7 @@ control which pixels are sorted, and you can chain passes, undo them, and export
 - [Keyboard shortcuts](#keyboard-shortcuts)
 - [How it works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
+- [More projects](#more-projects)
 - [License](#license)
 
 ## Features
@@ -123,7 +124,7 @@ Open a terminal in the project folder, activate the environment (`.venv\Scripts\
 | Area        | Contents |
 |-------------|----------|
 | Left panel  | What to sort and how: Image, Direction, Sort by (key, order, quantization), Threshold. |
-| Center      | View tabs, the preview, and the play bar (Sort/Play button, progress, status). |
+| Centre      | View tabs, the preview, and the play bar (Sort/Play button, progress, status). |
 | Right panel | Mask, Animation (switch, algorithm, speed), History (undo, original, list of passes), Export. |
 
 Both side panels scroll with the mouse wheel when the window is short.
@@ -231,6 +232,11 @@ All three produce the same final image. Only the animation differs. **Save GIF**
 
 **Known limitation:** **Save GIF** records the animation of the *next* pass from the current state, on the
 working copy, whether or not the Animate switch is on.
+
+## More projects
+
+- [Pixel Merger](https://github.com/omroz14/Pixel-Merger): rebuild one image out of the pixels of another.
+- [Vector Field Studio](https://github.com/omroz14/VectorFieldVisualizer): explore 2D vector fields.
 
 ## License
 
