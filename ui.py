@@ -3,8 +3,9 @@ import math
 import os
 import tkinter as tk
 from collections import namedtuple
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 
+import customtkinter as ctk
 import numpy as np
 from PIL import Image, ImageOps, ImageTk
 
@@ -14,12 +15,18 @@ from theme import *
 
 WORK_MAX = 640   # side of the working copy (px); the preview and the animation run on it
 TICK_MS = 33     # ~30 frames per second
-PANEL_W = 330    # width of each side panel (px)
+PANEL_W = 290    # width of each side panel (px)
 
 ANIMATION, RESULT, MOTION, MASK, AFFECTED = "Animation", "Result", "Motion map", "Mask", "Affected"
 MODES = (ANIMATION, RESULT, MOTION, MASK, AFFECTED)
 IMG_TYPES = [("Images", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"), ("All files", "*.*")]
-MASK_OPTIONS = (("protect", "Protect selection"), ("sort", "Sort selection only"))
+MASK_OPTIONS = (("protect", "Protect"), ("sort", "Sort only"))
+PRESETS = (("→", 0), ("↗", 45), ("↑", 90), ("↖", 135), ("←", 180), ("↙", 225), ("↓", 270), ("↘", 315))
+ALGO_NOTES = {
+    "odd_even": "Even pairs, then odd pairs. Smooth, steady motion.",
+    "bitonic": "A sorting network: the fewest steps, with long jumps.",
+    "bubble": "One sweep per step. The slowest, but the most spectacular.",
+}
 
 # A committed pass: settings, the mask at full resolution and the property threshold (lo, hi in 0..1).
 # The threshold is evaluated when the pass runs, on the image of that moment, so only lo and hi are stored.
@@ -28,7 +35,7 @@ Spec = namedtuple("Spec", "angle prop levels reverse algo region lo hi")
 
 def _make_palette():
     """Motion map palette: background -> violet -> warm orange -> white."""
-    stops = [hex_to_rgb(BG), hex_to_rgb(ACCENT), hex_to_rgb(WARM), (255, 255, 255)]
+    stops = [hex_to_rgb(SURFACE), hex_to_rgb(ACCENT), hex_to_rgb(WARM), (255, 255, 255)]
     pos = [0.0, 0.4, 0.75, 1.0]
     xs = np.linspace(0, 1, 256)
     lut = np.zeros((256, 3), np.uint8)
@@ -44,13 +51,17 @@ def _label(options, key):
     return dict(options)[key]
 
 
-class App(tk.Tk):
+def _key(options, label):
+    return next(k for k, v in options if v == label)
+
+
+class App(ctk.CTk):
     def __init__(self):
-        super().__init__()
+        ctk.set_appearance_mode("dark")
+        super().__init__(fg_color=BG)
         self.title("Pixel Sort Studio")
         self.geometry("1400x860")
-        self.minsize(1180, 700)
-        self.configure(bg=BG)
+        self.minsize(1120, 680)
 
         self.src = None           # original, full resolution (PIL RGB)
         self.start = None         # original at working resolution (np.uint8)
@@ -68,6 +79,7 @@ class App(tk.Tk):
         self.thr_lo = 0           # threshold: lower bound of the sorted property (%)
         self.thr_hi = 100         # threshold: upper bound (%)
         self.reverse = tk.BooleanVar(value=False)
+        self.animate = tk.BooleanVar(value=False)   # step-by-step animation; off = instant result
         self.brush = 60
         self.speed = 2
 
@@ -75,7 +87,6 @@ class App(tk.Tk):
         self.run_spec = None      # settings of the active pass
         self.running = False
         self.mode = ANIMATION
-        self._panels = []         # (widget path, canvas) of the scrollable side panels
         self._after_id = None
         self._photo = None
         self._disp = None
@@ -88,205 +99,155 @@ class App(tk.Tk):
         self._build_ui()
         self._bind_keys()
         self._draw_compass()
+        self._on_animate()
         self._refresh_chain()
-        self._draw()
+        self.set_mode(ANIMATION)
 
     # ---------- building the interface ----------
 
-    def _make_panel(self, side):
-        """A scrollable side panel packed to `side`. Returns the frame to put widgets in."""
-        outer = tk.Frame(self, bg=SURFACE, width=PANEL_W)
-        outer.pack(side=side, fill="y")
-        outer.pack_propagate(False)
-
-        canvas = tk.Canvas(outer, bg=SURFACE, highlightthickness=0, width=PANEL_W - 16)
-        sb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-
-        inner = tk.Frame(canvas, bg=SURFACE)
-        win = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
-        self._panels.append((str(outer), canvas))
-        return inner
+    def _make_panel(self, column):
+        """A scrollable side panel in grid `column`. Returns the frame to put cards in."""
+        panel = ctk.CTkScrollableFrame(self, width=PANEL_W, fg_color=BG, corner_radius=0,
+                                       scrollbar_button_color=BG, scrollbar_button_hover_color=BORDER)
+        panel.grid(row=0, column=column, sticky="ns", padx=(12, 0) if column == 0 else (0, 12), pady=12)
+        return panel
 
     def _build_ui(self):
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("Pix.Horizontal.TProgressbar", troughcolor=SURFACE_2, background=ACCENT,
-                        bordercolor=SURFACE_2, lightcolor=ACCENT, darkcolor=ACCENT)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        left = self._make_panel(0)
+        right = self._make_panel(2)
+        self._build_left(left)
+        self._build_right(right)
+        self._build_main()
 
-        # Both panels are created before the main area, so the main area gets only what is left.
-        left = self._make_panel("left")
-        right = self._make_panel("right")
-
-        self.bind_all("<MouseWheel>", self._on_wheel)                  # Windows and macOS
-        if self.tk.call("tk", "windowingsystem") == "x11":             # Linux: the wheel sends buttons 4 and 5
-            self.bind_all("<Button-4>", lambda e: self._on_wheel(e, 1))
-            self.bind_all("<Button-5>", lambda e: self._on_wheel(e, -1))
-
-        # ----- left panel: what and how to sort -----
-        tk.Label(left, text="Pixel Sort", bg=SURFACE, fg=TEXT, font=FONT_TITLE).pack(anchor="w", padx=20, pady=(22, 0))
-        tk.Label(left, text="sort pixels along a chosen direction", bg=SURFACE, fg=MUTED,
-                 font=FONT_SMALL).pack(anchor="w", padx=20)
+    def _build_left(self, left):
+        """What to sort and how: image, direction, key, threshold."""
+        head = ctk.CTkFrame(left, fg_color="transparent")
+        head.pack(fill="x", pady=(4, 14), padx=4)
+        ctk.CTkLabel(head, text="Pixel Sort Studio", font=FONT_TITLE, text_color=TEXT, height=26).pack(anchor="w")
+        ctk.CTkLabel(head, text="sort pixels along any direction", font=FONT_SMALL,
+                     text_color=MUTED, height=16).pack(anchor="w")
 
         # IMAGE
-        section(left, "IMAGE")
-        Button(left, "Choose image…", self.open_image).pack(fill="x", padx=20)
-        self.lbl_file = tk.Label(left, text="no file", bg=SURFACE, fg=MUTED,
-                                 font=FONT_SMALL, anchor="w", justify="left")
-        self.lbl_file.pack(fill="x", padx=20, pady=(8, 0))
+        c = card(left, "IMAGE", "key O")
+        button(c, "Open image…", self.open_image).pack(fill="x", padx=PAD)
+        self.lbl_file = ctk.CTkLabel(c, text="No file loaded", font=FONT_SMALL, text_color=MUTED,
+                                     justify="left", anchor="w")
+        self.lbl_file.pack(fill="x", padx=PAD, pady=(6, PAD))
 
         # DIRECTION
-        section(left, "DIRECTION")
-        top = tk.Frame(left, bg=SURFACE)
-        top.pack(fill="x", padx=20)
-        self.compass = tk.Canvas(top, width=96, height=96, bg=SURFACE, highlightthickness=0)
+        c = card(left, "DIRECTION")
+        top = ctk.CTkFrame(c, fg_color="transparent")
+        top.pack(fill="x", padx=PAD)
+        self.compass = tk.Canvas(top, width=84, height=84, bg=SURFACE, highlightthickness=0)
         self.compass.pack(side="left")
-        info = tk.Frame(top, bg=SURFACE)
+        info = ctk.CTkFrame(top, fg_color="transparent")
         info.pack(side="left", padx=(14, 0), fill="both", expand=True)
-        self.lbl_angle = tk.Label(info, text="0°", bg=SURFACE, fg=TEXT, font=FONT_BIG)
-        self.lbl_angle.pack(anchor="w")
-        tk.Label(info, text="0° → right\n90° → up", bg=SURFACE, fg=MUTED,
-                 font=FONT_SMALL, justify="left").pack(anchor="w")
-        self.scale_angle = make_slider(left, 0, 359, 0)
-        self.scale_angle.pack(fill="x", padx=20, pady=(12, 0))
-        self.scale_angle.configure(command=self._on_angle)
-        grid = tk.Frame(left, bg=SURFACE)
-        grid.pack(fill="x", padx=20, pady=(10, 0))
-        for i, a in enumerate(range(0, 360, 45)):
-            Button(grid, f"{a}°", lambda a=a: self.set_angle(a)).grid(
-                row=i // 4, column=i % 4, padx=2, pady=2, sticky="ew")
-        for c in range(4):
-            grid.columnconfigure(c, weight=1)
+        self.lbl_angle = ctk.CTkLabel(info, text="0°", font=FONT_BIG, text_color=TEXT, anchor="w")
+        self.lbl_angle.pack(anchor="w", pady=(10, 0))
+        ctk.CTkLabel(info, text="0° right · 90° up", font=FONT_SMALL, text_color=MUTED,
+                     height=16, anchor="w").pack(anchor="w")
+        self.scale_angle = ctk.CTkSlider(c, from_=0, to=359, number_of_steps=359, height=16,
+                                         fg_color=SURFACE_2, progress_color=ACCENT, button_color=TEXT,
+                                         button_hover_color="#ffffff",
+                                         command=lambda v: self.set_angle(int(round(v))))
+        self.scale_angle.set(0)
+        self.scale_angle.pack(fill="x", padx=PAD - 4, pady=(10, 8))
+        self.presets = segmented(c, [a for a, _ in PRESETS],
+                                 lambda v: self.set_angle(dict(PRESETS)[v]))
+        self.presets.pack(fill="x", padx=PAD, pady=(0, PAD))
 
-        # SORT BY / ALGORITHM
-        section(left, "SORT BY")
-        self.prop_buttons = self._choice_grid(left, sorter.PROPERTIES, self.prop, self.set_prop, cols=2)
-        section(left, "ALGORITHM")
-        self.algo_buttons = self._choice_grid(left, sorter.ALGORITHMS, self.algo, self.set_algo, cols=1)
-        tk.Label(left, text="Bubble: one pass per frame. Slowest, but the most spectacular.",
-                 bg=SURFACE, fg=MUTED, font=FONT_SMALL, justify="left", wraplength=270).pack(anchor="w", padx=20, pady=(6, 0))
-
-        # PARAMETERS
-        section(left, "PARAMETERS")
-        lv = tk.Frame(left, bg=SURFACE)
-        lv.pack(fill="x", padx=20)
-        tk.Label(lv, text="Key quantization", bg=SURFACE, fg=TEXT, font=FONT).pack(side="left")
-        self.lbl_levels = tk.Label(lv, text="full", bg=SURFACE, fg=MUTED, font=FONT_SMALL)
-        self.lbl_levels.pack(side="right")
-        self.scale_levels = make_slider(left, 8, 256, 256)
-        self.scale_levels.pack(fill="x", padx=20)
-        self.scale_levels.configure(command=self._on_levels)
-        tk.Label(left, text="Fewer levels = coarser sort. Pixels in the same level keep their original order.",
-                 bg=SURFACE, fg=MUTED, font=FONT_SMALL, justify="left", wraplength=270).pack(anchor="w", padx=20)
-        tk.Checkbutton(left, text="Descending", variable=self.reverse, command=self._on_setting_change,
-                       bg=SURFACE, fg=TEXT, selectcolor=SURFACE_2, activebackground=SURFACE,
-                       activeforeground=TEXT, highlightthickness=0, font=FONT).pack(anchor="w", padx=20, pady=(6, 0))
+        # SORT BY
+        c = card(left, "SORT BY")
+        self.prop_grid = ChoiceGrid(c, sorter.PROPERTIES, self.prop, self.set_prop, cols=2)
+        switch(c, "Descending order", self.reverse, self._on_setting_change).pack(
+            anchor="w", padx=PAD, pady=(10, 6))
+        self.row_levels = SliderRow(c, "Key quantization", 8, 256, 256, self._on_levels,
+                                    fmt=lambda v: "full" if v >= 256 else f"{v} levels")
+        note(c, "Fewer levels give a coarser sort. Pixels in one level keep their order.", pady=(0, PAD))
 
         # THRESHOLD
-        section(left, "THRESHOLD")
-        tr = tk.Frame(left, bg=SURFACE)
-        tr.pack(fill="x", padx=20)
-        tk.Label(tr, text="Affected pixel range", bg=SURFACE, fg=TEXT, font=FONT).pack(side="left")
-        self.lbl_thr = tk.Label(tr, text="0–100%", bg=SURFACE, fg=MUTED, font=FONT_SMALL)
-        self.lbl_thr.pack(side="right")
-        self.scale_thr_lo = make_slider(left, 0, 100, self.thr_lo)
-        self.scale_thr_lo.pack(fill="x", padx=20)
-        self.scale_thr_lo.configure(command=self._on_thr_lo)
-        self.scale_thr_hi = make_slider(left, 0, 100, self.thr_hi)
-        self.scale_thr_hi.pack(fill="x", padx=20)
-        self.scale_thr_hi.configure(command=self._on_thr_hi)
-        tk.Label(left, text="Top slider: lower bound, bottom slider: upper bound, both on the property chosen in "
-                            "“Sort by”. Pixels outside the range stay in place and split the line into separate "
-                            "segments. Preview: the Affected view.",
-                 bg=SURFACE, fg=MUTED, font=FONT_SMALL, justify="left", wraplength=270).pack(anchor="w", padx=20, pady=(6, 24))
+        c = card(left, "THRESHOLD")
+        self.row_thr_lo = SliderRow(c, "From", 0, 100, self.thr_lo, self._on_thr_lo, fmt=lambda v: f"{v}%")
+        self.row_thr_hi = SliderRow(c, "To", 0, 100, self.thr_hi, self._on_thr_hi, fmt=lambda v: f"{v}%")
+        note(c, "Only pixels whose “Sort by” value is in this range move. The rest stay put and "
+                "split lines into segments. Preview them in the Affected view.", pady=(0, PAD))
 
-        # ----- right panel: mask, animation, export -----
+    def _build_right(self, right):
+        """Mask, animation, history and export."""
         # MASK
-        section(right, "MASK")
-        bp = tk.Frame(right, bg=SURFACE)
-        bp.pack(fill="x", padx=20)
-        tk.Label(bp, text="Brush size", bg=SURFACE, fg=TEXT, font=FONT).pack(side="left")
-        self.lbl_brush = tk.Label(bp, text=f"{self.brush} px", bg=SURFACE, fg=MUTED, font=FONT_SMALL)
-        self.lbl_brush.pack(side="right")
-        self.scale_brush = make_slider(right, 2, 200, self.brush)
-        self.scale_brush.pack(fill="x", padx=20)
-        self.scale_brush.configure(command=self._on_brush)
-        self.mask_buttons = self._choice_grid(right, MASK_OPTIONS, "protect" if self.protect else "sort",
-                                              self.set_mask_mode, cols=1)
-        mb = tk.Frame(right, bg=SURFACE)
-        mb.pack(fill="x", padx=20, pady=(6, 0))
-        Button(mb, "Clear", self.clear_mask).pack(side="left", fill="x", expand=True)
-        Button(mb, "Invert", self.invert_mask).pack(side="left", fill="x", expand=True, padx=(6, 0))
-        tk.Label(right, text="Paint in the Mask view (M). LMB paints, RMB or Shift+LMB erases.",
-                 bg=SURFACE, fg=MUTED, font=FONT_SMALL, justify="left", wraplength=270).pack(anchor="w", padx=20, pady=(6, 0))
+        c = card(right, "MASK", "key M")
+        self.mask_tabs = segmented(c, [lbl for _, lbl in MASK_OPTIONS],
+                                   lambda v: self.set_mask_mode(_key(MASK_OPTIONS, v)))
+        self.mask_tabs.set(_label(MASK_OPTIONS, "protect"))
+        self.mask_tabs.pack(fill="x", padx=PAD, pady=(0, 6))
+        self.row_brush = SliderRow(c, "Brush size", 2, 200, self.brush, self._on_brush, fmt=lambda v: f"{v} px")
+        mb = ctk.CTkFrame(c, fg_color="transparent")
+        mb.pack(fill="x", padx=PAD, pady=(6, 0))
+        button(mb, "Clear", self.clear_mask, width=10).pack(side="left", fill="x", expand=True)
+        button(mb, "Invert", self.invert_mask, width=10).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        note(c, "Paint in the Mask view: left button paints, right button or Shift erases.", pady=(8, PAD))
 
-        # ANIMATION
-        section(right, "ANIMATION")
-        sp = tk.Frame(right, bg=SURFACE)
-        sp.pack(fill="x", padx=20)
-        tk.Label(sp, text="Speed", bg=SURFACE, fg=TEXT, font=FONT).pack(side="left")
-        self.lbl_speed = tk.Label(sp, text=f"{self.speed}×", bg=SURFACE, fg=MUTED, font=FONT_SMALL)
-        self.lbl_speed.pack(side="right")
-        self.scale_speed = make_slider(right, 1, 40, self.speed)
-        self.scale_speed.pack(fill="x", padx=20)
-        self.scale_speed.configure(command=self._on_speed)
-        btns = tk.Frame(right, bg=SURFACE)
-        btns.pack(fill="x", padx=20, pady=(12, 0))
-        self.btn_play = Button(btns, "▶  Play", self.toggle_play, accent=True)
-        self.btn_play.pack(fill="x")
-        self.progress = ttk.Progressbar(right, style="Pix.Horizontal.TProgressbar", maximum=100)
-        self.progress.pack(fill="x", padx=20, pady=(12, 0))
-        hist = tk.Frame(right, bg=SURFACE)
-        hist.pack(fill="x", padx=20, pady=(10, 0))
-        Button(hist, "↶ Undo", self.undo).pack(side="left", fill="x", expand=True)
-        Button(hist, "↺ Original", self.reset_to_original).pack(side="left", fill="x", expand=True, padx=(6, 0))
-        self.lbl_chain = tk.Label(right, text="", bg=SURFACE, fg=MUTED, font=FONT_SMALL, anchor="w")
-        self.lbl_chain.pack(fill="x", padx=20, pady=(6, 0))
+        # ANIMATION: the algorithm and the speed only matter when the pass is animated
+        c = card(right, "ANIMATION")
+        switch(c, "Animate the sorting", self.animate, self._on_animate).pack(anchor="w", padx=PAD, pady=(0, 2))
+        self.lbl_anim = note(c, "", pady=(2, 10))
+        self.lbl_algo_head = ctk.CTkLabel(c, text="Algorithm", font=FONT, text_color=TEXT, height=20, anchor="w")
+        self.lbl_algo_head.pack(fill="x", padx=PAD)
+        self.algo_tabs = segmented(c, [lbl for _, lbl in sorter.ALGORITHMS],
+                                   lambda v: self.set_algo(_key(sorter.ALGORITHMS, v)))
+        self.algo_tabs.set(_label(sorter.ALGORITHMS, self.algo))
+        self.algo_tabs.pack(fill="x", padx=PAD, pady=(4, 0))
+        self.lbl_algo = note(c, ALGO_NOTES[self.algo], pady=(6, 6))
+        self.row_speed = SliderRow(c, "Speed", 1, 40, self.speed, self._on_speed, fmt=lambda v: f"{v}×")
+        ctk.CTkFrame(c, fg_color="transparent", height=PAD - 4).pack()
+
+        # HISTORY
+        c = card(right, "HISTORY")
+        hist = ctk.CTkFrame(c, fg_color="transparent")
+        hist.pack(fill="x", padx=PAD)
+        button(hist, "↶  Undo", self.undo, width=10).pack(side="left", fill="x", expand=True)
+        button(hist, "↺  Original", self.reset_to_original, width=10).pack(
+            side="left", fill="x", expand=True, padx=(6, 0))
+        self.lbl_chain = ctk.CTkLabel(c, text="", font=FONT_SMALL, text_color=MUTED, justify="left", anchor="w")
+        self.lbl_chain.pack(fill="x", padx=PAD, pady=(8, PAD))
 
         # EXPORT
-        section(right, "EXPORT")
-        ex = tk.Frame(right, bg=SURFACE)
-        ex.pack(fill="x", padx=20, pady=(0, 24))
-        Button(ex, "Save result", self.save_result).pack(side="left", fill="x", expand=True)
-        Button(ex, "Save GIF", self.save_gif).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        c = card(right, "EXPORT")
+        ex = ctk.CTkFrame(c, fg_color="transparent")
+        ex.pack(fill="x", padx=PAD, pady=(0, PAD))
+        button(ex, "Save image", self.save_result, width=10).pack(side="left", fill="x", expand=True)
+        button(ex, "Save GIF", self.save_gif, width=10).pack(side="left", fill="x", expand=True, padx=(6, 0))
 
-        # ----- main area -----
-        main = tk.Frame(self, bg=BG)
-        main.pack(side="left", fill="both", expand=True)
-        modebar = tk.Frame(main, bg=BG)
-        modebar.pack(fill="x", padx=24, pady=(18, 0))
-        self.mode_buttons = {}
-        for m in MODES:
-            b = Button(modebar, m, lambda m=m: self.set_mode(m))
-            b.pack(side="left", padx=(0, 6))
-            self.mode_buttons[m] = b
-        self.stage = tk.Canvas(main, bg=BG, highlightthickness=0)
-        self.stage.pack(fill="both", expand=True, padx=24, pady=16)
+    def _build_main(self):
+        """The center: view tabs, the stage and the play bar."""
+        main = ctk.CTkFrame(self, fg_color="transparent")
+        main.grid(row=0, column=1, sticky="nsew", padx=12, pady=12)
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(1, weight=1)
+
+        self.tabs = segmented(main, MODES, self.set_mode)
+        self.tabs.grid(row=0, column=0, sticky="w", pady=(4, 10))
+        ctk.CTkLabel(main, text="Space play · 1–5 views · Ctrl+Z undo", font=FONT_SMALL,
+                     text_color=MUTED).grid(row=0, column=0, sticky="e", pady=(4, 10))
+
+        frame = ctk.CTkFrame(main, fg_color=SURFACE, corner_radius=12)
+        frame.grid(row=1, column=0, sticky="nsew")
+        self.stage = tk.Canvas(frame, bg=SURFACE, highlightthickness=0)
+        self.stage.pack(fill="both", expand=True, padx=8, pady=8)
         self._bind_stage()
-        self.lbl_status = tk.Label(main, text="", bg=BG, fg=MUTED, font=FONT_SMALL, anchor="w")
-        self.lbl_status.pack(fill="x", padx=24, pady=(0, 12))
 
-    def _choice_grid(self, parent, options, current, command, cols):
-        wrap = tk.Frame(parent, bg=SURFACE)
-        wrap.pack(fill="x", padx=20)
-        buttons = {}
-        for i, (key, label) in enumerate(options):
-            b = Button(wrap, label, lambda k=key: command(k))
-            b.grid(row=i // cols, column=i % cols, sticky="ew", padx=2, pady=2)
-            buttons[key] = b
-        for c in range(cols):
-            wrap.columnconfigure(c, weight=1)
-        self._mark(buttons, current)
-        return buttons
-
-    @staticmethod
-    def _mark(buttons, current):
-        for key, b in buttons.items():
-            b.select(key == current)
+        bar = ctk.CTkFrame(main, fg_color=SURFACE, corner_radius=12)
+        bar.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        bar.grid_columnconfigure(1, weight=1)
+        self.btn_play = button(bar, "▶  Sort", self.toggle_play, accent=True, width=130, height=38)
+        self.btn_play.grid(row=0, column=0, rowspan=2, padx=PAD, pady=PAD - 2)
+        self.progress = ctk.CTkProgressBar(bar, height=8, fg_color=SURFACE_2, progress_color=ACCENT)
+        self.progress.set(0)
+        self.progress.grid(row=0, column=1, sticky="ew", padx=(0, PAD), pady=(PAD, 0))
+        self.lbl_status = ctk.CTkLabel(bar, text="", font=FONT_SMALL, text_color=MUTED, anchor="w", height=18)
+        self.lbl_status.grid(row=1, column=1, sticky="ew", padx=(0, PAD), pady=(2, PAD - 4))
 
     def _bind_stage(self):
         s = self.stage
@@ -307,101 +268,90 @@ class App(tk.Tk):
         self.bind("<m>", lambda e: self.set_mode(MASK))
         self.bind("<r>", lambda e: self.reset_to_original())
         self.bind("<Control-z>", lambda e: self.undo())
-
-    def _on_wheel(self, e, step=None):
-        """Scrolls the side panel under the pointer. step: +1 up, -1 down (Linux buttons 4 and 5)."""
-        if step is None:                       # Windows and macOS: the direction is the sign of delta
-            step = 1 if e.delta > 0 else -1
-        try:
-            w = self.winfo_containing(e.x_root, e.y_root)
-        except KeyError:
-            return
-        if w is None:
-            return
-        path = str(w)
-        for outer, canvas in self._panels:
-            if path == outer or path.startswith(outer + "."):
-                canvas.yview_scroll(-step, "units")
-                return
+        for i, m in enumerate(MODES, 1):
+            self.bind(f"<Key-{i}>", lambda e, m=m: self.set_mode(m))
 
     # ---------- settings ----------
-
-    def _on_angle(self, v):
-        self.set_angle(int(float(v)))
 
     def set_angle(self, a):
         a = float(a) % 360
         if a == self.angle:
             return
         self.angle = a
-        self.scale_angle.set(a)   # triggers _on_angle, which returns here early
-        self.lbl_angle.configure(text=f"{a:g}°")
+        self.scale_angle.set(a)
         self._draw_compass()
         self._on_setting_change()
 
     def _on_levels(self, v):
-        v = int(float(v))
         self.levels = None if v >= 256 else v
-        self.lbl_levels.configure(text="full" if self.levels is None else str(v))
         self._on_setting_change()
 
     def _on_thr_lo(self, v):
-        v = int(float(v))
         if v == self.thr_lo:
             return
         self.thr_lo = v
         if v > self.thr_hi:
-            self.thr_hi = v            # keep the range valid right away
-            self.scale_thr_hi.set(v)   # moves the other slider; its handler then sees no change
+            self.thr_hi = v               # keep the range valid right away
+            self.row_thr_hi.set(v)
         self._on_thr_change()
 
     def _on_thr_hi(self, v):
-        v = int(float(v))
         if v == self.thr_hi:
             return
         self.thr_hi = v
         if v < self.thr_lo:
             self.thr_lo = v
-            self.scale_thr_lo.set(v)
+            self.row_thr_lo.set(v)
         self._on_thr_change()
 
     def _on_thr_change(self):
-        self.lbl_thr.configure(text=f"{self.thr_lo}–{self.thr_hi}%")
         if self.run is not None:
             self._cancel_run()
-        self.set_mode(AFFECTED)        # shows right away which pixels will be sorted
+        self.set_mode(AFFECTED)           # shows right away which pixels will be sorted
 
     def _on_speed(self, v):
-        self.speed = int(float(v))
-        self.lbl_speed.configure(text=f"{self.speed}×")
+        self.speed = v
 
     def _on_brush(self, v):
-        self.brush = int(float(v))
-        self.lbl_brush.configure(text=f"{self.brush} px")
+        self.brush = v
+
+    def _on_animate(self):
+        on = self.animate.get()
+        self.lbl_anim.configure(text="Play shows every step of the algorithm." if on
+                                else "Off: Sort applies each pass instantly.")
+        color = TEXT if on else MUTED
+        self.lbl_algo_head.configure(text_color=color)
+        self.algo_tabs.configure(state="normal" if on else "disabled")
+        self.row_speed.enable(on)
+        if self.run is None:
+            self.btn_play.configure(text=self._play_text())
+
+    def _play_text(self):
+        return "▶  Play" if self.animate.get() else "▶  Sort"
 
     def set_prop(self, key):
         if key == self.prop:
             return
         self.prop = key
-        self._mark(self.prop_buttons, key)
+        self.prop_grid.select(key)
         self._on_setting_change()
 
     def set_algo(self, key):
         if key == self.algo:
             return
         self.algo = key
-        self._mark(self.algo_buttons, key)
+        self.algo_tabs.set(_label(sorter.ALGORITHMS, key))
+        self.lbl_algo.configure(text=ALGO_NOTES[key])
         self._on_setting_change()
 
     def set_mask_mode(self, key):
         self.protect = key == "protect"
-        self._mark(self.mask_buttons, key)
         self._on_mask_change()
 
     def _on_setting_change(self):
         if self.run is not None:
             self._cancel_run()
-            self._status("Settings changed: the next animation starts from the last committed state.")
+            self._status("Settings changed: the next pass starts from the last committed state.")
         # Keep the Affected view open while tuning; any other view returns to the animation.
         self.set_mode(AFFECTED if self.mode == AFFECTED else ANIMATION)
 
@@ -411,17 +361,21 @@ class App(tk.Tk):
         self._draw()
 
     def _draw_compass(self):
+        a = self.angle
+        self.lbl_angle.configure(text=f"{a:g}°")
+        self.presets.set(next((arrow for arrow, deg in PRESETS if deg == a), ""))
         c = self.compass
         c.delete("all")
-        cx = cy = 48
-        r = 42
+        cx = cy = 42
+        r = 38
         c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=BORDER, width=2)
-        for deg in (0, 90, 180, 270):
+        for deg in range(0, 360, 45):
             rad = math.radians(deg)
-            c.create_line(cx + (r - 6) * math.cos(rad), cy - (r - 6) * math.sin(rad),
+            inner = r - (7 if deg % 90 == 0 else 4)
+            c.create_line(cx + inner * math.cos(rad), cy - inner * math.sin(rad),
                           cx + r * math.cos(rad), cy - r * math.sin(rad), fill=MUTED)
-        rad = math.radians(self.angle)
-        L = r - 10
+        rad = math.radians(a)
+        L = r - 9
         c.create_line(cx, cy, cx + L * math.cos(rad), cy - L * math.sin(rad),
                       fill=ACCENT, width=3, arrow=tk.LAST, arrowshape=(10, 12, 4))
         c.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, fill=TEXT, outline="")
@@ -474,7 +428,7 @@ class App(tk.Tk):
         inside = np.array(self._disp["mask"]) > 127
         if not inside.any():
             arr = base
-            caption = "MASK · nothing selected"
+            caption = "MASK · nothing selected · paint with the left button"
         else:
             color = hex_to_rgb(WARM) if self.protect else hex_to_rgb(ACCENT)
             arr = maskmod.overlay(base, inside, color)
@@ -484,7 +438,10 @@ class App(tk.Tk):
         self._place(Image.fromarray(arr), x0, y0, caption)
 
     def _paint_start(self, e, add):
-        if self.mode != MASK or self.src is None:
+        if self.src is None:
+            self.open_image()             # the empty stage works as an "open" button
+            return
+        if self.mode != MASK:
             return
         self._layout()
         if self.run is not None:
@@ -532,9 +489,13 @@ class App(tk.Tk):
     def _work_size(self):
         return self.base.shape[1::-1]
 
-    def _start_run(self):
-        spec = Spec(self.angle, self.prop, self.levels, self.reverse.get(), self.algo,
+    def _make_spec(self):
+        """Settings of the next pass, taken from the panels."""
+        return Spec(self.angle, self.prop, self.levels, self.reverse.get(), self.algo,
                     self._region_full(), self.thr_lo / 100, self.thr_hi / 100)
+
+    def _start_run(self):
+        spec = self._make_spec()
         region = sorter.effective_region(self.base, self._work_region(spec.region),
                                          spec.prop, spec.lo, spec.hi)
         segs = sorter.build_segments(self.base.shape[:2], spec.angle, region)
@@ -544,7 +505,7 @@ class App(tk.Tk):
         ck = sorter.sort_keys(self.base.reshape(-1, 3), spec.prop, spec.levels, spec.reverse)
         self.run = sorter.Animator(self.base, segs, ck, spec.algo)
         self.run_spec = spec
-        self.progress["value"] = 0
+        self.progress.set(0)
         return True
 
     def _stop_timer(self):
@@ -557,22 +518,25 @@ class App(tk.Tk):
         self._stop_timer()
         self.run = None
         self.run_spec = None
-        self.progress["value"] = 0
-        self.btn_play.set_text("▶  Play")
+        self.progress.set(0)
+        self.btn_play.configure(text=self._play_text())
 
     def toggle_play(self):
         if self.src is None:
-            self._status("Choose an image first.")
+            self._status("Open an image first.")
             return
         if self.running:
             self._stop_timer()
-            self.btn_play.set_text("▶  Resume")
+            self.btn_play.configure(text="▶  Resume")
             self._status("Paused. Changing a setting cancels this pass.")
+            return
+        if self.run is None and not self.animate.get():
+            self._run_instant()
             return
         if self.run is None and not self._start_run():
             return
         self.running = True
-        self.btn_play.set_text("❚❚  Pause")
+        self.btn_play.configure(text="❚❚  Pause")
         self.set_mode(ANIMATION)
         self._tick()
 
@@ -587,7 +551,7 @@ class App(tk.Tk):
         if self.run.finished:
             self._finish_run()
             return
-        self.progress["value"] = 100.0 * self.run.steps_done / max(1, self.run.total)
+        self.progress.set(self.run.steps_done / max(1, self.run.total))
         self._status(f"Sorting step {self.run.steps_done} / {self.run.total}")
         if self.mode == ANIMATION:
             self._show(self.run.render(), self._caption())
@@ -600,6 +564,22 @@ class App(tk.Tk):
         final = run.render()
         self.last_heat = run.activity_map()
         self._cancel_run()
+        self._commit_pass(final, spec)
+
+    def _run_instant(self):
+        """Animation off: computes the whole pass at once, without the step-by-step Animator."""
+        spec = self._make_spec()
+        region = sorter.effective_region(self.base, self._work_region(spec.region),
+                                         spec.prop, spec.lo, spec.hi)
+        if region is not None and not region.any():
+            self._status("The mask and threshold leave nothing to sort.")
+            return
+        final = sorter.run_fast(self.base, spec.angle, spec.prop, spec.levels, spec.reverse, region)
+        self.last_heat = None          # the motion map needs the step-by-step run
+        self._commit_pass(final, spec)
+
+    def _commit_pass(self, final, spec):
+        """Makes a finished pass the new committed state, or reports that it changed nothing."""
         if np.array_equal(final, self.base):
             self._status("This direction and key no longer change anything.")
         else:
@@ -607,8 +587,8 @@ class App(tk.Tk):
             self.base = final
             self.chain.append(spec)
             self.full_cache = None
-            self._status(f"Pass {len(self.chain)} committed. Change the direction or key and play again.")
-        self.progress["value"] = 100
+            self._status(f"Pass {len(self.chain)} committed. Change the direction or key and sort again.")
+        self.progress.set(1)
         self._refresh_chain()
         self.set_mode(ANIMATION)
 
@@ -638,8 +618,16 @@ class App(tk.Tk):
         self._status("Back to the original. Undo restores the previous state.")
 
     def _refresh_chain(self):
-        n = len(self.chain)
-        self.lbl_chain.configure(text=f"Committed passes: {n}" if n else "State: original")
+        """Lists the committed passes (the last few) under the history buttons."""
+        if not self.chain:
+            self.lbl_chain.configure(text="Original image, no passes yet")
+            return
+        lines = [f"{i}.  {s.angle:g}° · {_label(sorter.PROPERTIES, s.prop)}"
+                 f"{' ↓' if s.reverse else ''}{'' if s.lo <= 0 and s.hi >= 1 else f' · {s.lo:.0%}–{s.hi:.0%}'}"
+                 for i, s in enumerate(self.chain, 1)]
+        if len(lines) > 6:
+            lines = [f"… {len(lines) - 5} earlier"] + lines[-5:]
+        self.lbl_chain.configure(text="\n".join(lines))
 
     def _full_state(self):
         """Full-resolution result: replays the committed passes on the original (cached)."""
@@ -657,15 +645,14 @@ class App(tk.Tk):
 
     def set_mode(self, mode):
         self.mode = mode
-        for name, b in self.mode_buttons.items():
-            b.select(name == mode)
+        self.tabs.set(mode)
         self._draw()
         if mode == MASK and self.src is not None:
-            self._status("LMB paints · RMB or Shift+LMB erases · the circle shows the brush size")
+            self._status("Left button paints · right button or Shift erases · the circle is the brush")
 
     def _draw(self):
         if self.src is None:
-            self._placeholder("Choose an image in the left panel\n(or press O)")
+            self._placeholder("Click here or press O to open an image")
             return
         if self.mode == ANIMATION:
             frame = self.run.render() if self.run is not None else self.base
@@ -675,7 +662,7 @@ class App(tk.Tk):
         elif self.mode == MOTION:
             heat = self.run.activity_map() if self.run is not None else self.last_heat
             if heat is None:
-                self._placeholder("Run a sort to see the motion map")
+                self._placeholder("Turn on “Animate the sorting” and play a pass\nto see where pixels moved")
             else:
                 self._draw_map(heat)
         elif self.mode == AFFECTED:
@@ -697,12 +684,12 @@ class App(tk.Tk):
         if self.run is not None:
             return (f"ANIMATION · {self.angle:g}° · {_label(sorter.PROPERTIES, self.prop)} · "
                     f"step {self.run.steps_done}/{self.run.total}")
-        return f"STATE · {len(self.chain)} passes"
+        return f"PREVIEW · {len(self.chain)} passes"
 
     def _draw_map(self, heat):
         peak = float(heat.max())
         idx = (heat / peak * 255).astype(np.uint8) if peak > 0 else np.zeros(heat.shape, np.uint8)
-        self._show(PALETTE[idx], "MOTION MAP · bright spots changed pixels most often")
+        self._show(PALETTE[idx], "MOTION MAP · bright spots changed most often")
 
     def _stage_size(self):
         return max(self.stage.winfo_width(), 50), max(self.stage.winfo_height(), 50)
@@ -710,21 +697,25 @@ class App(tk.Tk):
     def _fit(self, size):
         """(width, height, x0, y0, scale) of an image of `size`, centered on the canvas."""
         w, h = self._stage_size()
-        s = min((w - 24) / size[0], (h - 24) / size[1])
+        top = 30                           # room for the caption
+        s = min((w - 24) / size[0], (h - top - 12) / size[1])
         dw, dh = max(1, round(size[0] * s)), max(1, round(size[1] * s))
-        return dw, dh, (w - dw) // 2, (h - dh) // 2, dw / size[0]
+        return dw, dh, (w - dw) // 2, top + (h - top - 12 - dh) // 2, dw / size[0]
 
     def _placeholder(self, text):
         self.stage.delete("all")
         w, h = self._stage_size()
-        self.stage.create_text(w // 2, h // 2, text=text, fill=MUTED, font=FONT, justify="center")
+        bw, bh = min(420, w - 40), min(220, h - 40)
+        self.stage.create_rectangle(w // 2 - bw // 2, h // 2 - bh // 2, w // 2 + bw // 2, h // 2 + bh // 2,
+                                    outline=BORDER, dash=(6, 4), width=2)
+        self.stage.create_text(w // 2, h // 2 - 22, text="🖼", fill=MUTED, font=(FAMILY, -32))
+        self.stage.create_text(w // 2, h // 2 + 22, text=text, fill=MUTED, font=FONT, justify="center")
 
     def _place(self, pil, x0, y0, caption):
         self._photo = ImageTk.PhotoImage(pil)
         self.stage.delete("all")
-        self.stage.create_rectangle(x0 - 1, y0 - 1, x0 + pil.width, y0 + pil.height, outline=BORDER)
         self.stage.create_image(x0, y0, image=self._photo, anchor="nw")
-        self.stage.create_text(16, 12, anchor="nw", fill=MUTED, font=FONT_SMALL, text=caption)
+        self.stage.create_text(10, 6, anchor="nw", fill=MUTED, font=FONT_SECTION, text=caption)
 
     def _show(self, data, caption):
         img = data if isinstance(data, Image.Image) else Image.fromarray(data)
@@ -735,7 +726,7 @@ class App(tk.Tk):
     # ---------- files ----------
 
     def open_image(self):
-        path = filedialog.askopenfilename(title="Choose an image", filetypes=IMG_TYPES)
+        path = filedialog.askopenfilename(title="Open an image", filetypes=IMG_TYPES)
         if not path:
             return
         try:
@@ -754,16 +745,16 @@ class App(tk.Tk):
         self.last_heat = None
         self.mask = None
         self._disp = None
-        self.lbl_file.configure(text=f"{os.path.basename(path)}\n{img.width} × {img.height} px", fg=TEXT)
+        self.lbl_file.configure(text=f"{os.path.basename(path)}\n{img.width} × {img.height} px", text_color=TEXT)
         self._refresh_chain()
         self.set_mode(ANIMATION)
-        self._status("Image loaded. Paint an area in the Mask view, or pick a direction and press Play.")
+        self._status("Image loaded. Pick a direction and a key, then press Sort.")
 
     def save_result(self):
         if self.src is None:
-            self._status("Choose an image first.")
+            self._status("Open an image first.")
             return
-        path = filedialog.asksaveasfilename(title="Save result", defaultextension=".png",
+        path = filedialog.asksaveasfilename(title="Save image", defaultextension=".png",
                                             initialfile="pixel_sort.png",
                                             filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg")])
         if not path:
@@ -773,7 +764,7 @@ class App(tk.Tk):
 
     def save_gif(self):
         if self.src is None:
-            self._status("Choose an image first.")
+            self._status("Open an image first.")
             return
         path = filedialog.asksaveasfilename(title="Save animation", defaultextension=".gif",
                                             initialfile="pixel_sort.gif", filetypes=[("GIF", "*.gif")])

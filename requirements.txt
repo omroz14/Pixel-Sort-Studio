@@ -3,3 +3,4 @@
 #   Windows / macOS: included with the installer from python.org
 numpy>=1.24
 Pillow>=10.0
+customtkinter>=5.2
