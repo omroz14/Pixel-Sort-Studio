@@ -138,7 +138,9 @@ The **Motion map** view needs an animated pass, because it counts how often each
 
 ### Threshold
 
-![Threshold: only the bright highlights of the dunes are sorted](docs/images/mask-view.png)
+<p align="center">
+  <img src="docs/images/mask-view.png" alt="Threshold: only the bright highlights of the dunes are sorted" width="600">
+</p>
 
 The **From** and **To** sliders set a range (in percent) of the property chosen in **Sort by**. Only pixels
 inside that range are sorted. The other pixels stay where they are and split each line into separate
