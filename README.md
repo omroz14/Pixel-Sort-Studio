@@ -25,7 +25,7 @@ control which pixels are sorted, and you can chain passes, undo them, and export
 
 | Odd-even | Bitonic | Bubble |
 |:---:|:---:|:---:|
-| ![Odd-even sort](docs/images/sort-odd-even.gif) | ![Bitonic sort](docs/images/sort-bitonic.gif) | ![Bubble sort](docs/images/sort-bubble.gif) |
+| ![Odd-even sort](docs/images/fish_oddeven.gif) | ![Bitonic sort](docs/images/fish_bitonic.gif) | ![Bubble sort](docs/images/fish_bubble.gif) |
 
 ## Contents
 
