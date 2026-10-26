@@ -21,6 +21,16 @@ control which pixels are sorted, and you can chain passes, undo them, and export
 |:---:|:---:|
 | ![Original photo](docs/images/example-before.png) | ![Sorted photo](docs/images/example-after.png) |
 
+## Demo
+
+<!-- Put the GIFs in docs/images/ with these names. -->
+
+![Pixel Sort Studio animation](docs/images/demo.gif)
+
+| Odd-even | Bitonic | Bubble |
+|:---:|:---:|:---:|
+| ![Odd-even sort](docs/images/sort-odd-even.gif) | ![Bitonic sort](docs/images/sort-bitonic.gif) | ![Bubble sort](docs/images/sort-bubble.gif) |
+
 ## Contents
 
 - [Features](#features)
