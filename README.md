@@ -59,7 +59,7 @@ You need **Python 3.10 or newer** (developed and tested with 3.12).
 1. Install Python from [python.org](https://www.python.org/downloads/). In the installer, tick
    **Add python.exe to PATH**. Tkinter is included.
 2. Download this project: **Code → Download ZIP** on GitHub, then unzip it. If you use Git, run
-   `git clone https://github.com/omroz14/pixel-sort-studio.git` instead.
+   `git clone https://github.com/omroz14/Pixel-Sort-Studio.git` instead.
 3. Open PowerShell in the project folder and run:
 
    ```powershell
@@ -78,8 +78,8 @@ Tkinter is a system package, so `pip` cannot install it.
 
 ```bash
 sudo apt install python3-tk python3-venv git
-git clone https://github.com/omroz14/pixel-sort-studio.git
-cd pixel-sort-studio
+git clone https://github.com/omroz14/Pixel-Sort-Studio.git
+cd Pixel-Sort-Studio
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -91,8 +91,8 @@ python main.py
 Install Python from [python.org](https://www.python.org/downloads/) (it includes Tkinter), then:
 
 ```bash
-git clone https://github.com/omroz14/pixel-sort-studio.git
-cd pixel-sort-studio
+git clone https://github.com/omroz14/Pixel-Sort-Studio.git
+cd Pixel-Sort-Studio
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -233,8 +233,8 @@ working copy, whether or not the Animate switch is on.
 
 ## More projects
 
-- [Pixel Merger Studio](https://github.com/omroz14/pixel-merger-studio): rebuild one image out of the pixels of another.
-- [Vector Field Studio](https://github.com/omroz14/vector-field-studio): explore 2D vector fields.
+- [Pixel Merger Studio](https://github.com/omroz14/Pixel-Merger-Studio): rebuild one image out of the pixels of another.
+- [Vector Field Studio](https://github.com/omroz14/Vector-Field-Studio): explore 2D vector fields.
 
 ## License
 
